@@ -1,0 +1,16 @@
+{
+  "files": {
+    "main.css": "/Encrypted-Drive/static/css/main.b4146c20.css",
+    "main.js": "/Encrypted-Drive/static/js/main.216d6ffa.js",
+    "static/js/453.74ed18be.chunk.js": "/Encrypted-Drive/static/js/453.74ed18be.chunk.js",
+    "static/media/web_neutral_sq_SI.svg": "/Encrypted-Drive/static/media/web_neutral_sq_SI.d397eb1bcbd0457eec0ff62f68f6bbb7.svg",
+    "index.html": "/Encrypted-Drive/index.html",
+    "main.b4146c20.css.map": "/Encrypted-Drive/static/css/main.b4146c20.css.map",
+    "main.216d6ffa.js.map": "/Encrypted-Drive/static/js/main.216d6ffa.js.map",
+    "453.74ed18be.chunk.js.map": "/Encrypted-Drive/static/js/453.74ed18be.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.b4146c20.css",
+    "static/js/main.216d6ffa.js"
+  ]
+}
