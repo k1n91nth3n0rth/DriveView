@@ -1,16 +1,16 @@
 {
   "files": {
-    "main.css": "/Encrypted-Drive/static/css/main.b4146c20.css",
-    "main.js": "/Encrypted-Drive/static/js/main.216d6ffa.js",
-    "static/js/453.74ed18be.chunk.js": "/Encrypted-Drive/static/js/453.74ed18be.chunk.js",
-    "static/media/web_neutral_sq_SI.svg": "/Encrypted-Drive/static/media/web_neutral_sq_SI.d397eb1bcbd0457eec0ff62f68f6bbb7.svg",
-    "index.html": "/Encrypted-Drive/index.html",
-    "main.b4146c20.css.map": "/Encrypted-Drive/static/css/main.b4146c20.css.map",
-    "main.216d6ffa.js.map": "/Encrypted-Drive/static/js/main.216d6ffa.js.map",
-    "453.74ed18be.chunk.js.map": "/Encrypted-Drive/static/js/453.74ed18be.chunk.js.map"
+    "main.css": "/DriveView/static/css/main.b4146c20.css",
+    "main.js": "/DriveView/static/js/main.0e04f76d.js",
+    "static/js/453.0f9c3330.chunk.js": "/DriveView/static/js/453.0f9c3330.chunk.js",
+    "static/media/web_neutral_sq_SI.svg": "/DriveView/static/media/web_neutral_sq_SI.d397eb1bcbd0457eec0ff62f68f6bbb7.svg",
+    "index.html": "/DriveView/index.html",
+    "main.b4146c20.css.map": "/DriveView/static/css/main.b4146c20.css.map",
+    "main.0e04f76d.js.map": "/DriveView/static/js/main.0e04f76d.js.map",
+    "453.0f9c3330.chunk.js.map": "/DriveView/static/js/453.0f9c3330.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.b4146c20.css",
-    "static/js/main.216d6ffa.js"
+    "static/js/main.0e04f76d.js"
   ]
 }
