@@ -258,6 +258,7 @@ function ImageGrid({ accessToken }) {
         display: 'flex',
         justifyContent: 'center',
         gap: '20px',
+        paddingBottom: '1.5em', // Added padding from the bottom
     };
 
     const fullscreenButtonStyle = {
