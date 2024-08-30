@@ -17,7 +17,7 @@ function ImageGrid({ accessToken }) {
             return;
         }
 
-        axios.get('https://www.googleapis.com/drive/v3/files/' + fileId, {
+        axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
             },
@@ -50,6 +50,76 @@ function ImageGrid({ accessToken }) {
         setCurrentIndex(null);
     };
 
+    const handleDeleteImage = async () => {
+        if (selectedImage) {
+            try {
+                await axios.delete(`https://www.googleapis.com/drive/v3/files/${selectedImage.id}`, {
+                    headers: {
+                        Authorization: `Bearer ${accessToken}`,
+                    },
+                });
+                setImages(images.filter(image => image.id !== selectedImage.id));
+                setSelectedImage(null);
+                setCurrentIndex(null);
+            } catch (error) {
+                console.error('Error deleting image:', error);
+            }
+        }
+    };
+
+    const handleAddToFavorites = async () => {
+        if (selectedImage) {
+            try {
+                const response = await axios.post(
+                    `https://www.googleapis.com/drive/v3/files/${selectedImage.id}/copy`,
+                    {
+                        parents: ['1UX2QrSscOG57oWufb7yaG9WuuOV_J3Zz'],
+                    }, // Empty object for the request body if not needed
+                    {
+                        headers: {
+                            Authorization: `Bearer ${accessToken}`,
+                        },
+                    }
+                );
+
+                // const folderResponse = await axios.get('https://www.googleapis.com/drive/v3/files', {
+                //     headers: {
+                //         Authorization: `Bearer ${accessToken}`,
+                //     },
+                //     params: {
+                //         q: "name = 'Encrypted-Drive' and 'Favorites' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+                //         fields: 'files(id)',
+                //     },
+                // });
+
+                // const favoriteFolderId = folderResponse.data.files[0]?.id;
+                // console.log(favoriteFolderId)
+
+                // if (favoriteFolderId) {
+                //     const formData = new FormData();
+                //     formData.append('metadata', new Blob([JSON.stringify({
+                //         name: selectedImage.name,
+                //         parents: [favoriteFolderId],
+                //     })], { type: 'application/json' }));
+                //     formData.append('file', response.data);
+
+                //     await axios.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', formData, {
+                //         headers: {
+                //             Authorization: `Bearer ${accessToken}`,
+                //             'Content-Type': 'multipart/related',
+                //         },
+                //     });
+
+                //     alert('Image added to Favorites!');
+                // } else {
+                //     console.error('Favorites folder not found.');
+                // }
+            } catch (error) {
+                console.error('Error adding image to Favorites:', error);
+            }
+        }
+    };
+
     const handleFolderClick = async (folderId) => {
         setSelectedFolder(folderId);
         setSelectedImage(null);
@@ -69,6 +139,11 @@ function ImageGrid({ accessToken }) {
         } catch (error) {
             console.error('Error fetching images:', error);
         }
+    };
+
+    const handleBackClick = () => {
+        setSelectedFolder(null);
+        setImages([]);
     };
 
     const handleKeyboardNavigation = useCallback((e) => {
@@ -146,13 +221,62 @@ function ImageGrid({ accessToken }) {
         }
     }, [selectedImage]);
 
+    const folderButtonStyle = {
+        padding: '10px',
+        fontSize: '16px',
+        borderRadius: '5px',
+        border: '1px solid #ccc',
+        backgroundColor: '#f5f5f5',
+        cursor: 'pointer',
+        transition: 'background-color 0.3s',
+        textAlign: 'center',
+        boxSizing: 'border-box',
+    };
+
+    const folderGridStyle = {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(3, 1fr)',
+        gap: '15px',
+        padding: '20px',
+    };
+
+    const backButtonStyle = {
+        padding: '10px 20px',
+        fontSize: '16px',
+        borderRadius: '5px',
+        border: '1px solid #ccc',
+        backgroundColor: '#f5f5f5',
+        cursor: 'pointer',
+        marginBottom: '20px',
+        alignSelf: 'start',
+    };
+
+    const buttonContainerStyle = {
+        position: 'absolute',
+        bottom: '20px',
+        width: '100%',
+        display: 'flex',
+        justifyContent: 'center',
+        gap: '20px',
+    };
+
+    const fullscreenButtonStyle = {
+        padding: '10px 20px',
+        fontSize: '16px',
+        borderRadius: '5px',
+        border: '1px solid #ccc',
+        backgroundColor: '#f5f5f5',
+        cursor: 'pointer',
+    };
+
     return (
         <div className="image-grid-container">
             {!selectedFolder && (
-                <div className="folder-list">
+                <div style={folderGridStyle}>
                     {folders.map((folder) => (
                         <button
                             key={folder.id}
+                            style={folderButtonStyle}
                             onClick={() => handleFolderClick(folder.id)}
                         >
                             {folder.name}
@@ -163,13 +287,11 @@ function ImageGrid({ accessToken }) {
 
             {selectedFolder && (
                 <>
-                    {selectedImage && (
-                        <div className="fullscreen-overlay" onClick={handleCloseFullscreen}>
-                            <img src={`data:;base64,${image}`} alt={selectedImage.name} className="fullscreen-image" />
-                        </div>
-                    )}
+                    <button style={backButtonStyle} onClick={handleBackClick}>
+                        Back to Folders
+                    </button>
                     <div className="image-grid">
-                        {images.map((image, index) => (
+                    {images.map((image, index) => (
                             <img
                                 key={image.id}
                                 src={image.thumbnailLink}
@@ -179,6 +301,24 @@ function ImageGrid({ accessToken }) {
                         ))}
                     </div>
                 </>
+            )}
+
+            {selectedImage && (
+                <div className="fullscreen-overlay" onClick={handleCloseFullscreen}>
+                    {selectedImage && (
+                        <>
+                            <img src={`data:;base64,${image}`} alt={selectedImage.name} className="fullscreen-image" />
+                            <div style={buttonContainerStyle}>
+                                <button style={fullscreenButtonStyle} onClick={handleDeleteImage}>
+                                    Delete
+                                </button>
+                                <button style={fullscreenButtonStyle} onClick={handleAddToFavorites}>
+                                    Favorites
+                                </button>
+                            </div>
+                        </>
+                    )}
+                </div>
             )}
         </div>
     );
