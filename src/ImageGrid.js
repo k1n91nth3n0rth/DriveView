@@ -11,12 +11,14 @@ function ImageGrid({ accessToken }) {
     const [currentIndex, setCurrentIndex] = useState(null);
     const [image, setImage] = useState(null);
 
-    const getImage = (fileId) => {
+    const getImage = (fileId, isPrefetch = false) => {
         if (imageCache[fileId]) {
-            setImage(imageCache[fileId]);
+            if (!isPrefetch) {
+                setImage(imageCache[fileId]);
+            }
             return;
         }
-
+    
         axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
@@ -35,8 +37,19 @@ function ImageGrid({ accessToken }) {
                 )
             );
             imageCache[fileId] = base64;
-            setImage(base64);
+            if (!isPrefetch) {
+                setImage(base64);
+            }
+        })
+        .catch((error) => {
+            console.error('Error fetching image:', error);
         });
+    };
+
+    const prefetchImages = (startIndex) => {
+        for (let i = startIndex; i < Math.min(startIndex + 2, images.length); i++) {
+            getImage(images[i].id, true);
+        }
     };
 
     const handleImageClick = (image, index) => {
@@ -58,9 +71,25 @@ function ImageGrid({ accessToken }) {
                         Authorization: `Bearer ${accessToken}`,
                     },
                 });
-                setImages(images.filter(image => image.id !== selectedImage.id));
-                setSelectedImage(null);
-                setCurrentIndex(null);
+    
+                const newImages = images.filter(image => image.id !== selectedImage.id);
+                setImages(newImages);
+    
+                if (newImages.length > 0) {
+                    if (currentIndex < newImages.length) {
+                        // Stay at the same index to show the next image
+                        setCurrentIndex(currentIndex);
+                        setSelectedImage(newImages[currentIndex]);
+                    } else {
+                        // Move to the previous image if the current one was the last
+                        setCurrentIndex(currentIndex - 1);
+                        setSelectedImage(newImages[currentIndex - 1]);
+                    }
+                } else {
+                    // No more images left
+                    setSelectedImage(null);
+                    setCurrentIndex(null);
+                }
             } catch (error) {
                 console.error('Error deleting image:', error);
             }
@@ -74,46 +103,13 @@ function ImageGrid({ accessToken }) {
                     `https://www.googleapis.com/drive/v3/files/${selectedImage.id}/copy`,
                     {
                         parents: ['1UX2QrSscOG57oWufb7yaG9WuuOV_J3Zz'],
-                    }, // Empty object for the request body if not needed
+                    },
                     {
                         headers: {
                             Authorization: `Bearer ${accessToken}`,
                         },
                     }
                 );
-
-                // const folderResponse = await axios.get('https://www.googleapis.com/drive/v3/files', {
-                //     headers: {
-                //         Authorization: `Bearer ${accessToken}`,
-                //     },
-                //     params: {
-                //         q: "name = 'Encrypted-Drive' and 'Favorites' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-                //         fields: 'files(id)',
-                //     },
-                // });
-
-                // const favoriteFolderId = folderResponse.data.files[0]?.id;
-                // console.log(favoriteFolderId)
-
-                // if (favoriteFolderId) {
-                //     const formData = new FormData();
-                //     formData.append('metadata', new Blob([JSON.stringify({
-                //         name: selectedImage.name,
-                //         parents: [favoriteFolderId],
-                //     })], { type: 'application/json' }));
-                //     formData.append('file', response.data);
-
-                //     await axios.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', formData, {
-                //         headers: {
-                //             Authorization: `Bearer ${accessToken}`,
-                //             'Content-Type': 'multipart/related',
-                //         },
-                //     });
-
-                //     alert('Image added to Favorites!');
-                // } else {
-                //     console.error('Favorites folder not found.');
-                // }
             } catch (error) {
                 console.error('Error adding image to Favorites:', error);
             }
@@ -158,21 +154,46 @@ function ImageGrid({ accessToken }) {
 
     const handleTouchStart = (e) => {
         const touchStartX = e.touches[0].clientX;
-
+        const touchStartY = e.touches[0].clientY;
+    
         const handleTouchEnd = (e) => {
             const touchEndX = e.changedTouches[0].clientX;
-
-            if (touchStartX - touchEndX > 50) {
-                setCurrentIndex((prevIndex) => Math.min(prevIndex + 1, images.length - 1));
-            } else if (touchEndX - touchStartX > 50) {
-                setCurrentIndex((prevIndex) => Math.max(prevIndex - 1, 0));
+            const touchEndY = e.changedTouches[0].clientY;
+    
+            const deltaX = touchStartX - touchEndX;
+            const deltaY = touchStartY - touchEndY;
+    
+            const swipeThreshold = 50;
+    
+            if (Math.abs(deltaX) > Math.abs(deltaY)) {
+                // Horizontal swipe
+                if (deltaX > swipeThreshold) {
+                    setCurrentIndex((prevIndex) => Math.min(prevIndex + 1, images.length - 1));
+                } else if (deltaX < -swipeThreshold) {
+                    setCurrentIndex((prevIndex) => Math.max(prevIndex - 1, 0));
+                }
+            } else {
+                // Vertical swipe (only handle swipe up)
+                if (deltaY > swipeThreshold) {
+                    handleDeleteImage(); // Swipe up to delete
+                }
             }
-
+    
             document.removeEventListener('touchend', handleTouchEnd);
         };
-
+    
         document.addEventListener('touchend', handleTouchEnd);
     };
+    
+
+    useEffect(() => {
+        if (currentIndex !== null && images.length > 0) {
+            const newImage = images[currentIndex];
+            setSelectedImage(newImage);
+            getImage(newImage.id);
+            prefetchImages(currentIndex + 1); // Prefetch the next two images
+        }
+    }, [currentIndex, images]);
 
     useEffect(() => {
         const fetchFolders = async () => {
@@ -305,10 +326,10 @@ function ImageGrid({ accessToken }) {
             )}
 
             {selectedImage && (
-                <div className="fullscreen-overlay" onClick={handleCloseFullscreen}>
+                <div className="fullscreen-overlay">
                     {selectedImage && (
                         <>
-                            <img src={`data:;base64,${image}`} alt={selectedImage.name} className="fullscreen-image" />
+                            <img src={`data:;base64,${image}`} alt={selectedImage.name} className="fullscreen-image" onClick={handleCloseFullscreen}/>
                             <div style={buttonContainerStyle}>
                                 <button style={fullscreenButtonStyle} onClick={handleDeleteImage}>
                                     Delete
