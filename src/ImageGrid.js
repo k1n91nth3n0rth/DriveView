@@ -203,9 +203,9 @@ function ImageGrid({ accessToken }) {
                 }
             } else {
                 // Vertical swipe (only handle swipe up)
-                if (deltaY > swipeThreshold) {
-                    handleDeleteImage(); // Swipe up to delete
-                }
+                //if (deltaY > swipeThreshold) {
+                //    handleDeleteImage(); // Swipe up to delete
+                //}
             }
     
             document.removeEventListener('touchend', handleTouchEnd);
@@ -335,6 +335,21 @@ function ImageGrid({ accessToken }) {
             document.body.style.overflow = '';
         };
     }, [selectedImage]);
+    
+    // Add these styles to the fullscreen container:
+    const fullscreenOverlayStyle = {
+        position: 'fixed',  // Ensures it is overlaying the screen
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.8)', // Add a dark background
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'auto', // Allow scrolling inside the fullscreen overlay
+        zIndex: 1000, // Ensure it appears above other content
+    };    
 
     const folderButtonStyle = {
         padding: '10px',
@@ -485,12 +500,18 @@ function ImageGrid({ accessToken }) {
             )}
 
             {selectedImage && (
-                <div className="fullscreen-overlay">
+            <div className="fullscreen-overlay" style={fullscreenOverlayStyle}>
                     <img
                         src={`data:;base64,${image}`}
                         alt={selectedImage.name}
                         className="fullscreen-image"
                         onClick={handleCloseFullscreen}
+                        style={{
+                            maxWidth: '100%',
+                            maxHeight: '100%',
+                            objectFit: 'contain',
+                            cursor: 'pointer',
+                        }}
                     />
 
                     <div style={{ ...buttonContainerStyle, flexDirection: 'column', alignItems: 'center' }}>
