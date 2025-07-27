@@ -371,6 +371,7 @@ function ImageGrid({ accessToken }) {
                     src={media}
                     controls
                     autoPlay
+                    loop
                     style={{
                         maxWidth: '100%',
                         maxHeight: '80vh',
