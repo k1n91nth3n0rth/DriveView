@@ -308,7 +308,7 @@ function ImageGrid({ accessToken }) {
             {selectedFolder && (
                 <>
                     <button style={fullscreenButtonStyle} onClick={handleBackClick}>Back to Folders</button>
-                    <select value={destinationFolderId} onChange={(e) => setDestinationFolderId(e.target.value)}>
+                    <select style={fullscreenButtonStyle} value={destinationFolderId} onChange={(e) => setDestinationFolderId(e.target.value)}>
                         <option value="" disabled>Select folder to copy</option>
                         {folders.map(folder => (
                             <option key={folder.id} value={folder.id}>{folder.name}</option>
@@ -317,7 +317,7 @@ function ImageGrid({ accessToken }) {
 
                     <div style={{ marginBottom: '10px' }}>
                         <label style={{ fontSize: '16px', marginRight: '10px' }}>Number of columns:</label>
-                        <select value={columns} onChange={(e) => setColumns(Number(e.target.value))}>
+                        <select style={folderButtonStyle} value={columns} onChange={(e) => setColumns(Number(e.target.value))}>
                             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
                                 <option key={num} value={num}>{num}</option>
                             ))}
