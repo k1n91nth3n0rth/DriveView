@@ -396,6 +396,35 @@ function ImageGrid({ accessToken }) {
             <div style={{ ...buttonContainerStyle, marginTop: '20px' }}>
                 <button style={fullscreenButtonStyle} onClick={handleDeleteMedia}>Delete</button>
                 <button style={fullscreenButtonStyle} onClick={handleAddToFavorites}>Favorites</button>
+<button
+    style={fullscreenButtonStyle}
+    onClick={(e) => {
+        e.stopPropagation();
+
+        // Remove any existing data URL prefix
+        const base64Data = media.replace(/^data:[^;]+;base64,/, '');
+        // Decode Base64
+        const decodedText = atob(base64Data);
+
+        // Open a new window
+        const newWindow = window.open();
+        newWindow.document.write(`
+            <html>
+                <head><title>Decoded Base64</title></head>
+                <body style="margin:0; padding:20px; font-family: Arial, sans-serif; background-color: #fff; color: #333;">
+                    <h1>Decoded Base64 Data</h1>
+                    <pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5;">
+${decodedText}
+                    </pre>
+                </body>
+            </html>
+        `);
+    }}
+>
+    Prompt
+</button>
+
+
                 <button
                     style={fullscreenButtonStyle}
                     onClick={(e) => {
