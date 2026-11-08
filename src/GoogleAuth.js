@@ -1,6 +1,6 @@
 import React from 'react';
 import { useGoogleLogin } from '@react-oauth/google';
-import googleLogin from './images/web_neutral_sq_SI.svg'; 
+import googleLogin from './images/web_neutral_sq_SI.svg';
 
 const GoogleAuth = ({ onSuccess, onError, clientId }) => {
   const login = useGoogleLogin({
@@ -11,7 +11,15 @@ const GoogleAuth = ({ onSuccess, onError, clientId }) => {
   });
 
   return (
-    <button onClick={login}><img src={googleLogin} alt="Sign In with Google"  /></button>
+    <button
+      type="button"
+      className="google-signin"
+      onClick={login}
+      aria-label="Sign in with Google"
+      title="Sign in with Google"
+    >
+      <img src={googleLogin} alt="" />
+    </button>
   );
 };
 

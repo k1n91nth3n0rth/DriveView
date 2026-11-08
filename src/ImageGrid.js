@@ -1,453 +1,562 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import './App.css';
+import {
+  AuthError,
+  copyFile,
+  fetchFileBlob,
+  listFolders,
+  listMediaInFolder,
+  trashFile,
+} from './driveApi';
+import { visibleFolders } from './folderFilter';
 
-const mediaCache = {};
+/**
+ * Media is held in an object-URL cache keyed by Drive file id.
+ *
+ * Object URLs are cheap to hand to <img>/<video> and avoid the previous
+ * approach of base64-encoding whole files into `data:` URLs, which doubled
+ * memory use and blew the call stack on multi-megabyte files.
+ *
+ * The cache is a bounded LRU: evicted entries have their object URL revoked
+ * so the browser can actually free the blob.
+ */
+const CACHE_LIMIT = 40;
+const PREFETCH_RADIUS = 10;
+const MAX_TEXT_PREVIEW_BYTES = 5 * 1024 * 1024;
 
-function ImageGrid({ accessToken }) {
-    const [folders, setFolders] = useState([]);
-    const [mediaFiles, setMediaFiles] = useState([]);
-    const [selectedFolder, setSelectedFolder] = useState(null);
-    const [selectedFile, setSelectedFile] = useState(null);
-    const [currentIndex, setCurrentIndex] = useState(null);
-    const [media, setMedia] = useState(null);
-    const [destinationFolderId, setDestinationFolderId] = useState('');
-    const [columns, setColumns] = useState(5);
+const urlCache = new Map();
+let protectedUrl = null;
 
-    const getMedia = (fileId, mimeType, isPrefetch = false) => {
-        if (mediaCache[fileId]) {
-            if (!isPrefetch) setMedia(mediaCache[fileId]);
-            return;
+function cacheGet(fileId) {
+  if (!urlCache.has(fileId)) return null;
+  const url = urlCache.get(fileId);
+  // Re-insert so the map's iteration order keeps behaving as LRU order.
+  urlCache.delete(fileId);
+  urlCache.set(fileId, url);
+  return url;
+}
+
+function cacheSet(fileId, url) {
+  if (urlCache.has(fileId)) return;
+  urlCache.set(fileId, url);
+  evictCache();
+}
+
+function cacheDrop(fileId) {
+  const url = urlCache.get(fileId);
+  if (!url) return;
+  urlCache.delete(fileId);
+  URL.revokeObjectURL(url);
+}
+
+function evictCache() {
+  let guard = 0;
+  while (urlCache.size > CACHE_LIMIT && guard <= urlCache.size) {
+    const [oldestId, oldestUrl] = urlCache.entries().next().value;
+    urlCache.delete(oldestId);
+    if (oldestUrl === protectedUrl) {
+      // Never revoke what is currently on screen — rotate it to the back.
+      urlCache.set(oldestId, oldestUrl);
+      guard += 1;
+      continue;
+    }
+    URL.revokeObjectURL(oldestUrl);
+  }
+}
+
+const isVideo = (mimeType) => Boolean(mimeType && mimeType.startsWith('video/'));
+
+function ImageGrid({ accessToken, onAuthExpired }) {
+  const [folders, setFolders] = useState([]);
+  const [foldersLoading, setFoldersLoading] = useState(true);
+  const [foldersError, setFoldersError] = useState(null);
+
+  const [mediaFiles, setMediaFiles] = useState([]);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaError, setMediaError] = useState(null);
+
+  const [selectedFolder, setSelectedFolder] = useState(null);
+  const [currentIndex, setCurrentIndex] = useState(null);
+
+  const [mediaUrl, setMediaUrl] = useState(null);
+  const [mediaFileLoading, setMediaFileLoading] = useState(false);
+  const [mediaFileError, setMediaFileError] = useState(null);
+
+  const [destinationFolderId, setDestinationFolderId] = useState('');
+  const [columns, setColumns] = useState(5);
+  const [notice, setNotice] = useState(null);
+
+  const requestRef = useRef(0);
+  const touchStartXRef = useRef(null);
+
+  /** Derive the currently selected file from the index. */
+  const selectedFile = currentIndex !== null ? mediaFiles[currentIndex] : null;
+
+  /** Route auth failures to the parent; everything else stays local. */
+  const handleError = useCallback(
+    (error) => {
+      if (error instanceof AuthError) {
+        onAuthExpired?.();
+        return true;
+      }
+      return false;
+    },
+    [onAuthExpired]
+  );
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const loadMedia = useCallback(
+    async (file, { background = false } = {}) => {
+      const cached = cacheGet(file.id);
+      if (cached) {
+        if (!background) {
+          protectedUrl = cached;
+          setMediaUrl(cached);
+          setMediaFileError(null);
         }
+        return;
+      }
 
-        axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-            },
-            responseType: "arraybuffer"
-        })
-        .then((res) => {
-            const base64 = btoa(
-                new Uint8Array(res.data).reduce(
-                    (data, byte) => data + String.fromCharCode(byte), ''
-                )
-            );
-            const dataUrl = `data:${mimeType};base64,${base64}`;
-            mediaCache[fileId] = dataUrl;
-            if (!isPrefetch) setMedia(dataUrl);
-        })
-        .catch((error) => {
-            console.error('Error fetching media:', error);
-        });
-    };
+      const requestId = background ? null : ++requestRef.current;
+      if (!background) {
+        setMediaUrl(null);
+        setMediaFileLoading(true);
+        setMediaFileError(null);
+      }
 
-    const prefetchMedia = (currentIndex) => {
-        const start = Math.max(0, currentIndex - 10);
-        const end = Math.min(mediaFiles.length, currentIndex + 10);
-
-        for (let i = start; i < end; i++) {
-            if (i !== currentIndex) {
-                const file = mediaFiles[i];
-                getMedia(file.id, file.mimeType, true);
-            }
+      try {
+        const blob = await fetchFileBlob(file.id, accessToken);
+        const url = URL.createObjectURL(blob);
+        cacheSet(file.id, url);
+        if (!background && requestId === requestRef.current) {
+          protectedUrl = url;
+          setMediaUrl(url);
         }
-    };
+      } catch (error) {
+        if (handleError(error)) return;
+        if (!background && requestId === requestRef.current) setMediaFileError(error.message);
+      } finally {
+        if (!background && requestId === requestRef.current) setMediaFileLoading(false);
+      }
+    },
+    [accessToken, handleError]
+  );
 
-    const handleMediaClick = (file, index) => {
-        getMedia(file.id, file.mimeType);
-        setSelectedFile(file);
-        setCurrentIndex(index);
-    };
+  const prefetchNeighbours = useCallback(
+    (index) => {
+      const start = Math.max(0, index - PREFETCH_RADIUS);
+      const end = Math.min(mediaFiles.length, index + PREFETCH_RADIUS + 1);
+      for (let i = start; i < end; i += 1) {
+        if (i !== index) loadMedia(mediaFiles[i], { background: true });
+      }
+    },
+    [mediaFiles, loadMedia]
+  );
 
-    const handleCloseFullscreen = () => {
-        setSelectedFile(null);
+  // Fetch the folder list once the token is available.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      setFoldersLoading(true);
+      setFoldersError(null);
+      try {
+        const allFolders = await listFolders(accessToken);
+        if (!cancelled) setFolders(visibleFolders(allFolders));
+      } catch (error) {
+        if (!cancelled && !handleError(error)) setFoldersError(error.message);
+      } finally {
+        if (!cancelled) setFoldersLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, handleError]);
+
+  // Keep the fullscreen media in sync with the selected index.
+  useEffect(() => {
+    if (!selectedFile || currentIndex === null) return;
+    loadMedia(selectedFile);
+    prefetchNeighbours(currentIndex);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex, mediaFiles]);
+
+  // Keyboard shortcuts + scroll lock while the viewer is open.
+  useEffect(() => {
+    if (!selectedFile) return undefined;
+
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
         setCurrentIndex(null);
+      } else if (event.key === 'ArrowLeft') {
+        setCurrentIndex((prev) => (prev === null ? prev : Math.max(prev - 1, 0)));
+      } else if (event.key === 'ArrowRight') {
+        setCurrentIndex((prev) =>
+          prev === null ? prev : Math.min(prev + 1, mediaFiles.length - 1)
+        );
+      }
     };
 
-    const handleDeleteMedia = async () => {
-        if (selectedFile) {
-            try {
-                await axios.patch(
-                    `https://www.googleapis.com/drive/v3/files/${selectedFile.id}`,
-                    { trashed: true },
-                    { headers: { Authorization: `Bearer ${accessToken}` } }
-                );
+    document.addEventListener('keydown', onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
 
-                const newFiles = mediaFiles.filter(file => file.id !== selectedFile.id);
-                setMediaFiles(newFiles);
-
-                if (newFiles.length > 0) {
-                    const newIndex = Math.min(currentIndex, newFiles.length - 1);
-                    setCurrentIndex(newIndex);
-                    setSelectedFile(newFiles[newIndex]);
-                } else {
-                    setSelectedFile(null);
-                    setCurrentIndex(null);
-                }
-            } catch (error) {
-                console.error('Error deleting media:', error);
-            }
-        }
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
     };
+  }, [selectedFile, currentIndex, mediaFiles.length]);
 
-    const handleAddToFavorites = async () => {
-        if (selectedFile && destinationFolderId) {
-            try {
-                await axios.post(
-                    `https://www.googleapis.com/drive/v3/files/${selectedFile.id}/copy`,
-                    { parents: [destinationFolderId] },
-                    { headers: { Authorization: `Bearer ${accessToken}` } }
-                );
-            } catch (error) {
-                console.error('Error adding to favorites:', error);
-            }
-        } else {
-            alert("Please select a folder first.");
-        }
-    };
+  // Release every object URL when the grid unmounts.
+  useEffect(
+    () => () => {
+      urlCache.forEach((url) => URL.revokeObjectURL(url));
+      urlCache.clear();
+      protectedUrl = null;
+    },
+    []
+  );
 
-    const handleFolderClick = async (folderId) => {
-        setSelectedFolder(folderId);
-        setSelectedFile(null);
+  const handleFolderClick = async (folderId) => {
+    setSelectedFolder(folderId);
+    setCurrentIndex(null);
+    setMediaUrl(null);
+    setMediaFiles([]);
+    setMediaError(null);
+    setMediaLoading(true);
+
+    try {
+      setMediaFiles(await listMediaInFolder(folderId, accessToken));
+    } catch (error) {
+      if (!handleError(error)) setMediaError(error.message);
+    } finally {
+      setMediaLoading(false);
+    }
+  };
+
+  const handleBackClick = () => {
+    setSelectedFolder(null);
+    setCurrentIndex(null);
+    setMediaUrl(null);
+    setMediaFiles([]);
+    setMediaError(null);
+  };
+
+  const handleMediaClick = (file, index) => {
+    setCurrentIndex(index);
+  };
+
+  const handleCloseFullscreen = () => {
+    setCurrentIndex(null);
+    setMediaUrl(null);
+  };
+
+  const handleDeleteMedia = async (event) => {
+    event.stopPropagation();
+    if (!selectedFile) return;
+
+    try {
+      await trashFile(selectedFile.id, accessToken);
+      cacheDrop(selectedFile.id);
+
+      const remaining = mediaFiles.filter((file) => file.id !== selectedFile.id);
+      setMediaFiles(remaining);
+
+      if (remaining.length === 0) {
         setCurrentIndex(null);
+        setMediaUrl(null);
+      } else {
+        const nextIndex = Math.min(currentIndex ?? 0, remaining.length - 1);
+        setCurrentIndex(nextIndex);
+      }
+      setNotice('Moved to trash.');
+    } catch (error) {
+      if (!handleError(error)) setNotice(`Delete failed: ${error.message}`);
+    }
+  };
 
-        let allMedia = [];
-        let nextPageToken = null;
+  const handleAddToFavorites = async (event) => {
+    event.stopPropagation();
+    if (!selectedFile) return;
+    if (!destinationFolderId) {
+      setNotice('Pick a destination folder first.');
+      return;
+    }
 
-        const queryMimeTypes = [
-            'image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/webp',
-            'video/mp4', 'video/webm', 'video/ogg'
-        ];
+    try {
+      await copyFile(selectedFile.id, destinationFolderId, accessToken);
+      setNotice('Copied to the selected folder.');
+    } catch (error) {
+      if (!handleError(error)) setNotice(`Copy failed: ${error.message}`);
+    }
+  };
 
-        const mimeQuery = queryMimeTypes.map(m => `mimeType='${m}'`).join(' OR ');
+  /**
+   * Open the file's bytes as plain text in a new tab.
+   *
+   * Uses a `text/plain` blob URL rather than document.write()-ing the content
+   * into a fresh document, so file contents can never execute as markup.
+   */
+  const handleViewAsText = async (event) => {
+    event.stopPropagation();
+    if (!selectedFile) return;
 
-        try {
-            do {
-                const response = await axios.get('https://www.googleapis.com/drive/v3/files', {
-                    headers: { Authorization: `Bearer ${accessToken}` },
-                    params: {
-                        q: `'${folderId}' in parents AND trashed=false AND (${mimeQuery})`,
-                        fields: 'nextPageToken, files(id, name, mimeType, thumbnailLink, webContentLink, webViewLink)',
-                        pageSize: 1000,
-                        pageToken: nextPageToken,
-                    },
-                });
+    try {
+      const blob = await fetchFileBlob(selectedFile.id, accessToken);
+      if (blob.size > MAX_TEXT_PREVIEW_BYTES) {
+        setNotice('File is too large to preview as text.');
+        return;
+      }
+      const textUrl = URL.createObjectURL(
+        new Blob([await blob.text()], { type: 'text/plain;charset=utf-8' })
+      );
+      window.open(textUrl, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(textUrl), 60000);
+    } catch (error) {
+      if (!handleError(error)) setNotice(`Could not read file: ${error.message}`);
+    }
+  };
 
-                allMedia = [...allMedia, ...response.data.files];
-                nextPageToken = response.data.nextPageToken;
-            } while (nextPageToken);
+  const handleOpenInNewTab = (event) => {
+    event.stopPropagation();
+    if (mediaUrl) window.open(mediaUrl, '_blank', 'noopener,noreferrer');
+  };
 
-            setMediaFiles(allMedia);
-        } catch (error) {
-            console.error('Error fetching media files:', error);
-        }
-    };
+  const handleTouchStart = (event) => {
+    touchStartXRef.current = event.touches[0].clientX;
+  };
 
-    const handleBackClick = () => {
-        setSelectedFolder(null);
-        setMediaFiles([]);
-    };
+  const handleTouchEnd = (event) => {
+    if (touchStartXRef.current === null) return;
+    const deltaX = touchStartXRef.current - event.changedTouches[0].clientX;
+    touchStartXRef.current = null;
+    if (Math.abs(deltaX) <= 50) return;
 
-    const handleKeyboardNavigation = useCallback((e) => {
-        if (!selectedFile) return;
-        if (e.key === 'ArrowLeft') {
-            setCurrentIndex((prev) => Math.max(prev - 1, 0));
-        } else if (e.key === 'ArrowRight') {
-            setCurrentIndex((prev) => Math.min(prev + 1, mediaFiles.length - 1));
-        }
-    }, [selectedFile, mediaFiles.length]);
+    if (deltaX > 0) {
+      setCurrentIndex((prev) => Math.min(prev + 1, mediaFiles.length - 1));
+    } else {
+      setCurrentIndex((prev) => Math.max(prev - 1, 0));
+    }
+  };
 
-    const handleTouchStart = (e) => {
-        const touchStartX = e.touches[0].clientX;
-        const handleTouchEnd = (e) => {
-            const touchEndX = e.changedTouches[0].clientX;
-            const deltaX = touchStartX - touchEndX;
-            if (Math.abs(deltaX) > 50) {
-                if (deltaX > 0) {
-                    setCurrentIndex((prev) => Math.min(prev + 1, mediaFiles.length - 1));
-                } else {
-                    setCurrentIndex((prev) => Math.max(prev - 1, 0));
-                }
-            }
-            document.removeEventListener('touchend', handleTouchEnd);
-        };
-        document.addEventListener('touchend', handleTouchEnd);
-    };
+  const canGoBack = currentIndex !== null && currentIndex > 0;
+  const canGoForward = currentIndex !== null && currentIndex < mediaFiles.length - 1;
 
-    useEffect(() => {
-        if (currentIndex !== null && mediaFiles.length > 0) {
-            const file = mediaFiles[currentIndex];
-            setSelectedFile(file);
-            getMedia(file.id, file.mimeType);
-            prefetchMedia(currentIndex);
-        }
-    }, [currentIndex, mediaFiles]);
+  return (
+    <div className="image-grid-container">
+      {notice && (
+        <p className="app-message" role="status">
+          {notice}
+        </p>
+      )}
 
-    useEffect(() => {
-        if (selectedFile) {
-            document.addEventListener('keydown', handleKeyboardNavigation);
-            document.addEventListener('touchstart', handleTouchStart);
-            document.body.style.overflow = 'hidden';
-            return () => {
-                document.removeEventListener('keydown', handleKeyboardNavigation);
-                document.removeEventListener('touchstart', handleTouchStart);
-                document.body.style.overflow = '';
-            };
-        }
-    }, [selectedFile, handleKeyboardNavigation]);
+      {!selectedFolder && (
+        <>
+          {foldersLoading && <p className="status-line">Loading folders…</p>}
+          {foldersError && (
+            <p className="status-line status-error" role="alert">
+              Could not load folders: {foldersError}
+            </p>
+          )}
+          {!foldersLoading && !foldersError && folders.length === 0 && (
+            <p className="status-line">No folders found in this Drive.</p>
+          )}
 
-    useEffect(() => {
-        const fetchFolders = async () => {
-            try {
-                let allFolders = [];
-                let pageToken = null;
+          <div className="folder-grid">
+            {folders.map((folder) => (
+              <button
+                key={folder.id}
+                type="button"
+                className="folder-button"
+                onClick={() => handleFolderClick(folder.id)}
+              >
+                {folder.name}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
-                do {
-                    const response = await axios.get('https://www.googleapis.com/drive/v3/files', {
-                        headers: { Authorization: `Bearer ${accessToken}` },
-                        params: {
-                            q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
-                            fields: 'nextPageToken, files(id, name, parents)',
-                            pageSize: 1000,
-                            pageToken,
-                        },
-                    });
+      {selectedFolder && (
+        <>
+          <div className="toolbar">
+            <button type="button" className="btn" onClick={handleBackClick}>
+              ← Back to folders
+            </button>
 
-                    allFolders = [...allFolders, ...response.data.files];
-                    pageToken = response.data.nextPageToken;
-                } while (pageToken);
+            <label className="toolbar-field">
+              <span>Copy to</span>
+              <select
+                className="btn"
+                value={destinationFolderId}
+                onChange={(event) => setDestinationFolderId(event.target.value)}
+              >
+                <option value="" disabled>
+                  Select folder
+                </option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-                const comfyUIFolders = allFolders.filter(f => f.name === 'ComfyUI');
-                const comfyUIIds = new Set(comfyUIFolders.map(f => f.id));
-                const descendantsToExclude = new Set();
-                const outputFolderIds = new Set();
+            <label className="toolbar-field">
+              <span>Columns</span>
+              <select
+                className="btn"
+                value={columns}
+                onChange={(event) => setColumns(Number(event.target.value))}
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                  <option key={num} value={num}>
+                    {num}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
 
-                const markDescendants = (parentId) => {
-                    for (const folder of allFolders) {
-                        if (folder.parents && folder.parents.includes(parentId)) {
-                            if (folder.name.toLowerCase() === 'output') {
-                                outputFolderIds.add(folder.id);
-                            } else {
-                                descendantsToExclude.add(folder.id);
-                                markDescendants(folder.id);
-                            }
-                        }
-                    }
-                };
+          {mediaLoading && <p className="status-line">Loading media…</p>}
+          {mediaError && (
+            <p className="status-line status-error" role="alert">
+              Could not load media: {mediaError}
+            </p>
+          )}
+          {!mediaLoading && !mediaError && mediaFiles.length === 0 && (
+            <p className="status-line">No images or videos in this folder.</p>
+          )}
 
-                comfyUIIds.forEach(markDescendants);
-                comfyUIIds.forEach(id => descendantsToExclude.add(id));
+          <div
+            className="media-grid"
+            style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+          >
+            {mediaFiles.map((file, index) => (
+              <button
+                key={file.id}
+                type="button"
+                className="media-tile"
+                onClick={() => handleMediaClick(file, index)}
+                title={file.name}
+                aria-label={`Open ${file.name}`}
+              >
+                {file.thumbnailLink ? (
+                  <img src={file.thumbnailLink} alt={file.name} loading="lazy" />
+                ) : (
+                  <span className="media-tile-fallback">
+                    <span aria-hidden="true">{isVideo(file.mimeType) ? '🎬' : '🖼️'}</span>
+                    <span className="media-tile-name">{file.name}</span>
+                  </span>
+                )}
+                {isVideo(file.mimeType) && <span className="media-tile-badge">video</span>}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
 
-                const filtered = allFolders.filter(folder =>
-                    !descendantsToExclude.has(folder.id) || outputFolderIds.has(folder.id)
-                );
-
-                setFolders(filtered);
-            } catch (error) {
-                console.error('Error fetching folders:', error);
-            }
-        };
-
-        fetchFolders();
-    }, [accessToken]);
-
-    const fullscreenOverlayStyle = {
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.9)',
-        zIndex: 1000,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        overflow: 'auto',
-    };
-
-
-    const folderButtonStyle = {
-        padding: '10px', fontSize: '16px', borderRadius: '5px',
-        border: '1px solid #ccc', backgroundColor: '#f5f5f5',
-        cursor: 'pointer', textAlign: 'center',
-    };
-
-    const folderGridStyle = {
-        display: 'grid',
-        gridTemplateColumns: 'repeat(3, 1fr)',
-        gap: '15px',
-        padding: '20px',
-    };
-
-    const fullscreenButtonStyle = {
-        padding: '10px 20px', fontSize: '16px',
-        borderRadius: '5px', border: '1px solid #ccc',
-        backgroundColor: '#f5f5f5', cursor: 'pointer',
-    };
-
-    const buttonContainerStyle = {
-        position: 'absolute',
-        bottom: '20px',
-        width: '100%',
-        display: 'flex',
-        justifyContent: 'center',
-        gap: '20px',
-    };
-
-    return (
-        <div className="image-grid-container">
-            {!selectedFolder && (
-                <div style={folderGridStyle}>
-                    {folders.map(folder => (
-                        <button key={folder.id} style={folderButtonStyle} onClick={() => handleFolderClick(folder.id)}>
-                            {folder.name}
-                        </button>
-                    ))}
-                </div>
-            )}
-
-            {selectedFolder && (
-                <>
-                    <button style={fullscreenButtonStyle} onClick={handleBackClick}>Back to Folders</button>
-                    <select style={fullscreenButtonStyle} value={destinationFolderId} onChange={(e) => setDestinationFolderId(e.target.value)}>
-                        <option value="" disabled>Select folder to copy</option>
-                        {folders.map(folder => (
-                            <option key={folder.id} value={folder.id}>{folder.name}</option>
-                        ))}
-                    </select>
-
-                    <div style={{ marginBottom: '10px' }}>
-                        <label style={{ fontSize: '16px', marginRight: '10px' }}>Number of columns:</label>
-                        <select style={folderButtonStyle} value={columns} onChange={(e) => setColumns(Number(e.target.value))}>
-                            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                                <option key={num} value={num}>{num}</option>
-                            ))}
-                        </select>
-                    </div>
-
-                    <div style={{
-                        display: 'grid',
-                        gridTemplateColumns: `repeat(${columns}, 1fr)`,
-                        gap: '10px',
-                        padding: '10px'
-                    }}>
-                        {mediaFiles.map((file, index) => (
-                            <img
-                                key={file.id}
-                                src={file.thumbnailLink}
-                                alt={file.name}
-                                onClick={() => handleMediaClick(file, index)}
-                                style={{
-                                    width: '100%',
-                                    height: 'auto',
-                                    objectFit: 'cover',
-                                    borderRadius: '8px',
-                                    cursor: 'pointer',
-                                }}
-                            />
-                        ))}
-                    </div>
-                </>
-            )}
-
-            {selectedFile && (
-    <div
-        className="fullscreen-overlay"
-        style={fullscreenOverlayStyle}
-        onClick={handleCloseFullscreen}
-    >
+      {selectedFile && (
         <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-            }}
+          className="fullscreen-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label={selectedFile.name}
+          onClick={handleCloseFullscreen}
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEnd}
         >
-            {selectedFile.mimeType.startsWith('video/') ? (
-                <video
-                    src={media}
-                    controls
-                    autoPlay
-                    loop
-                    style={{
-                        maxWidth: '100%',
-                        maxHeight: '80vh',
-                        borderRadius: '8px',
-                        objectFit: 'contain',
-                    }}
-                />
-            ) : (
-                <img
-                    src={media}
-                    alt={selectedFile.name}
-                    style={{
-                        maxWidth: '100%',
-                        maxHeight: '80vh',
-                        borderRadius: '8px',
-                        objectFit: 'contain',
-                        cursor: 'pointer',
-                    }}
-                />
+          <div className="fullscreen-content" onClick={(event) => event.stopPropagation()}>
+            {mediaFileLoading && <p className="status-line">Loading file…</p>}
+            {mediaFileError && (
+              <p className="status-line status-error" role="alert">
+                Could not load file: {mediaFileError}
+              </p>
             )}
 
-            <div style={{ ...buttonContainerStyle, marginTop: '20px' }}>
-                <button style={fullscreenButtonStyle} onClick={handleDeleteMedia}>Delete</button>
-                <button style={fullscreenButtonStyle} onClick={handleAddToFavorites}>Favorites</button>
-<button
-    style={fullscreenButtonStyle}
-    onClick={(e) => {
-        e.stopPropagation();
+            {!mediaFileLoading &&
+              !mediaFileError &&
+              mediaUrl &&
+              (isVideo(selectedFile.mimeType) ? (
+                // eslint-disable-next-line jsx-a11y/media-has-caption
+                <video
+                  src={mediaUrl}
+                  controls
+                  autoPlay
+                  loop
+                  playsInline
+                  className="viewer-media"
+                />
+              ) : (
+                <img src={mediaUrl} alt={selectedFile.name} className="viewer-media" />
+              ))}
 
-        // Remove any existing data URL prefix
-        const base64Data = media.replace(/^data:[^;]+;base64,/, '');
-        // Decode Base64
-        const decodedText = atob(base64Data);
-
-        // Open a new window
-        const newWindow = window.open();
-        newWindow.document.write(`
-            <html>
-                <head><title>Decoded Base64</title></head>
-                <body style="margin:0; padding:20px; font-family: Arial, sans-serif; background-color: #fff; color: #333;">
-                    <h1>Decoded Base64 Data</h1>
-                    <pre style="white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5;">
-${decodedText}
-                    </pre>
-                </body>
-            </html>
-        `);
-    }}
->
-    Prompt
-</button>
-
-
-                <button
-                    style={fullscreenButtonStyle}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        const newWindow = window.open();
-                        newWindow.document.write(`
-                            <html><head><title>Viewer</title></head><body style="margin:0; background:#000;">
-                                ${selectedFile.mimeType.startsWith('video/') ?
-                                `<video src="${media}" controls autoplay style="width:100%; height:100%"></video>` :
-                                `<img src="${media}" style="max-width:100%; max-height:100%; object-fit:contain;">`}
-                            </body></html>
-                        `);
-                    }}
-                >
-                    Open in New Tab
-                </button>
+            <div className="viewer-toolbar">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setCurrentIndex((prev) => Math.max(prev - 1, 0))}
+                disabled={!canGoBack}
+                aria-label="Previous file"
+              >
+                ←
+              </button>
+              <button type="button" className="btn" onClick={handleDeleteMedia}>
+                Delete
+              </button>
+              <button type="button" className="btn" onClick={handleAddToFavorites}>
+                Copy to folder
+              </button>
+              <button type="button" className="btn" onClick={handleViewAsText}>
+                View as text
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleOpenInNewTab}
+                disabled={!mediaUrl}
+              >
+                Open in new tab
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  setCurrentIndex((prev) => Math.min(prev + 1, mediaFiles.length - 1))
+                }
+                disabled={!canGoForward}
+                aria-label="Next file"
+              >
+                →
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleCloseFullscreen}
+                aria-label="Close viewer"
+              >
+                ✕
+              </button>
             </div>
-        </div>
-    </div>
-)}
 
+            <p className="viewer-caption">
+              {selectedFile.name}
+              {currentIndex !== null && mediaFiles.length > 0
+                ? ` — ${currentIndex + 1} / ${mediaFiles.length}`
+                : ''}
+            </p>
+          </div>
         </div>
-    );
+      )}
+    </div>
+  );
 }
 
 export default ImageGrid;

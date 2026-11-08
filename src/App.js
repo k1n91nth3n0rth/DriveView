@@ -1,86 +1,119 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import './App.css';
 import { GoogleOAuthProvider } from '@react-oauth/google';
 import GoogleAuth from './GoogleAuth';
 import ImageGrid from './ImageGrid';
 
-function App() {
-  const [accessToken, setAccessToken] = useState('');
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+const STORAGE_KEY = 'driveview.auth';
 
-  const clientId = '702873253730-3sl9n59ugg2lmu7r4i4tan4md3mjacki.apps.googleusercontent.com';
+// A Google OAuth *client* id is public by design (it ships in the JS bundle).
+// Set REACT_APP_GOOGLE_CLIENT_ID to point a fork at its own project.
+const CLIENT_ID =
+  process.env.REACT_APP_GOOGLE_CLIENT_ID ||
+  '702873253730-3sl9n59ugg2lmu7r4i4tan4md3mjacki.apps.googleusercontent.com';
+
+/**
+ * Read a previously stored session.
+ *
+ * Stores the expiry alongside the token so an obviously dead token does not
+ * sit in localStorage until the first Drive request fails.
+ */
+function readStoredSession() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+
+    const session = JSON.parse(raw);
+    if (!session.accessToken) return null;
+    if (session.expiresAt && session.expiresAt <= Date.now()) {
+      window.localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+    return session;
+  } catch {
+    window.localStorage.removeItem(STORAGE_KEY);
+    return null;
+  }
+}
+
+function App() {
+  const [session, setSession] = useState(readStoredSession);
+  const [message, setMessage] = useState(null);
 
   useEffect(() => {
-    const storedToken = localStorage.getItem('accessToken');
-    if (storedToken) {
-      setAccessToken(storedToken);
-      setIsAuthenticated(true);
+    if (!message) return undefined;
+    const timer = setTimeout(() => setMessage(null), 6000);
+    return () => clearTimeout(timer);
+  }, [message]);
+
+  const onSuccess = useCallback((response) => {
+    const expiresInMs = Number(response.expires_in || 3600) * 1000;
+    const next = {
+      accessToken: response.access_token,
+      // Expire a minute early so a request never races the token lifetime.
+      expiresAt: Date.now() + Math.max(expiresInMs - 60000, 0),
+    };
+
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* private mode / quota — the session still works for this tab */
     }
+    setSession(next);
   }, []);
 
-  const onSuccess = (response) => {
-    console.log('Google authentication successful:', response);
-    localStorage.setItem('accessToken', response.access_token);
-    setAccessToken(response.access_token);
-    setIsAuthenticated(true);
-  };
+  const onError = useCallback(() => {
+    setMessage('Google sign-in failed. Please try again.');
+  }, []);
 
-  const onError = (error) => {
-    console.error('Google authentication error:', error);
-    alert('Google authentication failed. Please try again.');
-  };
+  const handleLogout = useCallback(() => {
+    window.localStorage.removeItem(STORAGE_KEY);
+    setSession(null);
+  }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem('accessToken');
-    setAccessToken('');
-    setIsAuthenticated(false);
-  };
-  
- 
+  /** Called when Drive answers 401 — the token is dead, start over. */
+  const handleAuthExpired = useCallback(() => {
+    window.localStorage.removeItem(STORAGE_KEY);
+    setSession(null);
+    setMessage('Your Google session expired — please sign in again.');
+  }, []);
+
+  const accessToken = session?.accessToken || '';
 
   return (
     <div className="App">
       <header className="App-header">
-        <h1 style={{ marginBottom: '5px' }}>Drive View</h1>  
-        {accessToken && (
-        <button
-          onClick={handleLogout}
-          style={{
-            padding: '8px 16px',
-            fontSize: '16px',
-            borderRadius: '6px',
-            backgroundColor: '#ff4d4f',
-            color: '#fff',
-            border: 'none',
-            cursor: 'pointer',
-            marginBottom: '20px',
-          }}
-        >
-          Logout
-        </button>
-      )}
+        <h1 className="app-title">Drive View</h1>
 
-      
-        
-        <br></br>
-        <GoogleOAuthProvider clientId={clientId}>
+        {message && (
+          <p className="app-message" role="alert">
+            {message}
+          </p>
+        )}
+
+        {accessToken && (
+          <button type="button" className="btn btn-danger" onClick={handleLogout}>
+            Logout
+          </button>
+        )}
+
+        <GoogleOAuthProvider clientId={CLIENT_ID}>
           {accessToken ? (
-            <ImageGrid accessToken={accessToken} />
+            <ImageGrid accessToken={accessToken} onAuthExpired={handleAuthExpired} />
           ) : (
-            <GoogleAuth onSuccess={onSuccess} onError={onError} clientId={clientId} />
+            <GoogleAuth onSuccess={onSuccess} onError={onError} clientId={CLIENT_ID} />
           )}
         </GoogleOAuthProvider>
-        {/* ✅ Footer link */}
-        <div style={{ marginBottom: '30px', fontSize: '14px' }}>
+
+        <footer className="app-footer">
           <a
             href="https://script.google.com/macros/s/AKfycbzB0UaTxguR8i8MrcZlSI3cPIsb_-hLgEckT-6UzKBw0ZOYFDgplbJB_OnA3gUebIlS/exec"
             target="_blank"
             rel="noopener noreferrer"
-            style={{ color: '#ccc', textDecoration: 'underline' }}
           >
             Open Google Apps Script Project
           </a>
-        </div>
+        </footer>
       </header>
     </div>
   );
