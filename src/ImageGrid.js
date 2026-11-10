@@ -11,7 +11,7 @@ import {
 import { visibleFolders } from './folderFilter';
 
 /**
- * Media is held in an object-URL cache keyed by Drive file id.
+ * Media is held in an object-URL cache keyed by "accountId:fileId".
  *
  * Object URLs are cheap to hand to <img>/<video> and avoid the previous
  * approach of base64-encoding whole files into `data:` URLs, which doubled
@@ -27,36 +27,41 @@ const MAX_TEXT_PREVIEW_BYTES = 5 * 1024 * 1024;
 const urlCache = new Map();
 let protectedUrl = null;
 
-function cacheGet(fileId) {
-  if (!urlCache.has(fileId)) return null;
-  const url = urlCache.get(fileId);
-  // Re-insert so the map's iteration order keeps behaving as LRU order.
-  urlCache.delete(fileId);
-  urlCache.set(fileId, url);
+function cacheKey(accountId, fileId) {
+  return `${accountId}:${fileId}`;
+}
+
+function cacheGet(accountId, fileId) {
+  const key = cacheKey(accountId, fileId);
+  if (!urlCache.has(key)) return null;
+  const url = urlCache.get(key);
+  urlCache.delete(key);
+  urlCache.set(key, url);
   return url;
 }
 
-function cacheSet(fileId, url) {
-  if (urlCache.has(fileId)) return;
-  urlCache.set(fileId, url);
+function cacheSet(accountId, fileId, url) {
+  const key = cacheKey(accountId, fileId);
+  if (urlCache.has(key)) return;
+  urlCache.set(key, url);
   evictCache();
 }
 
-function cacheDrop(fileId) {
-  const url = urlCache.get(fileId);
+function cacheDrop(accountId, fileId) {
+  const key = cacheKey(accountId, fileId);
+  const url = urlCache.get(key);
   if (!url) return;
-  urlCache.delete(fileId);
+  urlCache.delete(key);
   URL.revokeObjectURL(url);
 }
 
 function evictCache() {
   let guard = 0;
   while (urlCache.size > CACHE_LIMIT && guard <= urlCache.size) {
-    const [oldestId, oldestUrl] = urlCache.entries().next().value;
-    urlCache.delete(oldestId);
+    const [oldestKey, oldestUrl] = urlCache.entries().next().value;
+    urlCache.delete(oldestKey);
     if (oldestUrl === protectedUrl) {
-      // Never revoke what is currently on screen — rotate it to the back.
-      urlCache.set(oldestId, oldestUrl);
+      urlCache.set(oldestKey, oldestUrl);
       guard += 1;
       continue;
     }
@@ -66,7 +71,7 @@ function evictCache() {
 
 const isVideo = (mimeType) => Boolean(mimeType && mimeType.startsWith('video/'));
 
-function ImageGrid({ accessToken, onAuthExpired }) {
+function ImageGrid({ accounts, activeAccountId, onAuthExpired }) {
   const [folders, setFolders] = useState([]);
   const [foldersLoading, setFoldersLoading] = useState(true);
   const [foldersError, setFoldersError] = useState(null);
@@ -92,11 +97,17 @@ function ImageGrid({ accessToken, onAuthExpired }) {
   /** Derive the currently selected file from the index. */
   const selectedFile = currentIndex !== null ? mediaFiles[currentIndex] : null;
 
+  /** Get the token for a given account. */
+  const getToken = useCallback((accountId) => {
+    const acc = accounts.find((a) => a.id === accountId);
+    return acc?.accessToken || '';
+  }, [accounts]);
+
   /** Route auth failures to the parent; everything else stays local. */
   const handleError = useCallback(
-    (error) => {
+    (error, failedAccountId) => {
       if (error instanceof AuthError) {
-        onAuthExpired?.();
+        onAuthExpired?.(failedAccountId);
         return true;
       }
       return false;
@@ -112,7 +123,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
 
   const loadMedia = useCallback(
     async (file, { background = false } = {}) => {
-      const cached = cacheGet(file.id);
+      const cached = cacheGet(file.accountId, file.id);
       if (cached) {
         if (!background) {
           protectedUrl = cached;
@@ -130,21 +141,22 @@ function ImageGrid({ accessToken, onAuthExpired }) {
       }
 
       try {
-        const blob = await fetchFileBlob(file.id, accessToken);
+        const token = getToken(file.accountId);
+        const blob = await fetchFileBlob(file.id, token);
         const url = URL.createObjectURL(blob);
-        cacheSet(file.id, url);
+        cacheSet(file.accountId, file.id, url);
         if (!background && requestId === requestRef.current) {
           protectedUrl = url;
           setMediaUrl(url);
         }
       } catch (error) {
-        if (handleError(error)) return;
+        if (handleError(error, file.accountId)) return;
         if (!background && requestId === requestRef.current) setMediaFileError(error.message);
       } finally {
         if (!background && requestId === requestRef.current) setMediaFileLoading(false);
       }
     },
-    [accessToken, handleError]
+    [getToken, handleError]
   );
 
   const prefetchNeighbours = useCallback(
@@ -158,7 +170,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     [mediaFiles, loadMedia]
   );
 
-  // Fetch the folder list once the token is available.
+  // Fetch folders from ALL accounts, merge and deduplicate
   useEffect(() => {
     let cancelled = false;
 
@@ -166,7 +178,16 @@ function ImageGrid({ accessToken, onAuthExpired }) {
       setFoldersLoading(true);
       setFoldersError(null);
       try {
-        const allFolders = await listFolders(accessToken);
+        const allFolders = [];
+        for (const acc of accounts) {
+          try {
+            const folders = await listFolders(acc.accessToken);
+            // Tag each folder with its accountId
+            allFolders.push(...folders.map((f) => ({ ...f, accountId: acc.id })));
+          } catch (e) {
+            if (!handleError(e, acc.id)) console.error('Failed to list folders for', acc.email, e);
+          }
+        }
         if (!cancelled) setFolders(visibleFolders(allFolders));
       } catch (error) {
         if (!cancelled && !handleError(error)) setFoldersError(error.message);
@@ -178,7 +199,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, handleError]);
+  }, [accounts, handleError]);
 
   // Keep the fullscreen media in sync with the selected index.
   useEffect(() => {
@@ -212,7 +233,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
       document.removeEventListener('keydown', onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [selectedFile, currentIndex, mediaFiles.length]);
+  }, [selectedFile, mediaFiles.length]);
 
   // Release every object URL when the grid unmounts.
   useEffect(
@@ -225,6 +246,9 @@ function ImageGrid({ accessToken, onAuthExpired }) {
   );
 
   const handleFolderClick = async (folderId) => {
+    const folder = folders.find((f) => f.id === folderId);
+    if (!folder) return;
+
     setSelectedFolder(folderId);
     setCurrentIndex(null);
     setMediaUrl(null);
@@ -233,7 +257,17 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     setMediaLoading(true);
 
     try {
-      setMediaFiles(await listMediaInFolder(folderId, accessToken));
+      // Fetch media from ALL accounts for this folder ID
+      const allMedia = [];
+      for (const acc of accounts) {
+        try {
+          const media = await listMediaInFolder(folderId, acc.accessToken);
+          allMedia.push(...media.map((m) => ({ ...m, accountId: acc.id })));
+        } catch (e) {
+          if (!handleError(e, acc.id)) console.error('Failed to list media for', acc.email, e);
+        }
+      }
+      setMediaFiles(allMedia);
     } catch (error) {
       if (!handleError(error)) setMediaError(error.message);
     } finally {
@@ -263,8 +297,9 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     if (!selectedFile) return;
 
     try {
-      await trashFile(selectedFile.id, accessToken);
-      cacheDrop(selectedFile.id);
+      const token = getToken(selectedFile.accountId);
+      await trashFile(selectedFile.id, token);
+      cacheDrop(selectedFile.accountId, selectedFile.id);
 
       const remaining = mediaFiles.filter((file) => file.id !== selectedFile.id);
       setMediaFiles(remaining);
@@ -278,7 +313,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
       }
       setNotice('Moved to trash.');
     } catch (error) {
-      if (!handleError(error)) setNotice(`Delete failed: ${error.message}`);
+      if (!handleError(error, selectedFile.accountId)) setNotice(`Delete failed: ${error.message}`);
     }
   };
 
@@ -291,10 +326,11 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     }
 
     try {
-      await copyFile(selectedFile.id, destinationFolderId, accessToken);
+      const token = getToken(selectedFile.accountId);
+      await copyFile(selectedFile.id, destinationFolderId, token);
       setNotice('Copied to the selected folder.');
     } catch (error) {
-      if (!handleError(error)) setNotice(`Copy failed: ${error.message}`);
+      if (!handleError(error, selectedFile.accountId)) setNotice(`Copy failed: ${error.message}`);
     }
   };
 
@@ -309,7 +345,8 @@ function ImageGrid({ accessToken, onAuthExpired }) {
     if (!selectedFile) return;
 
     try {
-      const blob = await fetchFileBlob(selectedFile.id, accessToken);
+      const token = getToken(selectedFile.accountId);
+      const blob = await fetchFileBlob(selectedFile.id, token);
       if (blob.size > MAX_TEXT_PREVIEW_BYTES) {
         setNotice('File is too large to preview as text.');
         return;
@@ -320,7 +357,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
       window.open(textUrl, '_blank', 'noopener,noreferrer');
       setTimeout(() => URL.revokeObjectURL(textUrl), 60000);
     } catch (error) {
-      if (!handleError(error)) setNotice(`Could not read file: ${error.message}`);
+      if (!handleError(error, selectedFile.accountId)) setNotice(`Could not read file: ${error.message}`);
     }
   };
 
@@ -366,18 +403,22 @@ function ImageGrid({ accessToken, onAuthExpired }) {
             </p>
           )}
           {!foldersLoading && !foldersError && folders.length === 0 && (
-            <p className="status-line">No folders found in this Drive.</p>
+            <p className="status-line">No folders found in any Drive.</p>
           )}
 
           <div className="folder-grid">
             {folders.map((folder) => (
               <button
-                key={folder.id}
+                key={`${folder.accountId}:${folder.id}`}
                 type="button"
                 className="folder-button"
                 onClick={() => handleFolderClick(folder.id)}
+                title={folder.name}
               >
-                {folder.name}
+                <span className="folder-name">{folder.name}</span>
+                <span className="folder-account-badge" title={accounts.find((a) => a.id === folder.accountId)?.email}>
+                  {accounts.findIndex((a) => a.id === folder.accountId) + 1}
+                </span>
               </button>
             ))}
           </div>
@@ -402,7 +443,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
                   Select folder
                 </option>
                 {folders.map((folder) => (
-                  <option key={folder.id} value={folder.id}>
+                  <option key={`${folder.accountId}:${folder.id}`} value={folder.id}>
                     {folder.name}
                   </option>
                 ))}
@@ -441,7 +482,7 @@ function ImageGrid({ accessToken, onAuthExpired }) {
           >
             {mediaFiles.map((file, index) => (
               <button
-                key={file.id}
+                key={`${file.accountId}:${file.id}`}
                 type="button"
                 className="media-tile"
                 onClick={() => handleMediaClick(file, index)}
@@ -457,6 +498,9 @@ function ImageGrid({ accessToken, onAuthExpired }) {
                   </span>
                 )}
                 {isVideo(file.mimeType) && <span className="media-tile-badge">video</span>}
+                <span className="media-account-badge" title={accounts.find((a) => a.id === file.accountId)?.email}>
+                  {accounts.findIndex((a) => a.id === file.accountId) + 1}
+                </span>
               </button>
             ))}
           </div>

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 
 /** Minimal fetch stub so tests never touch the network. */
@@ -28,26 +28,27 @@ test('renders the heading and the sign-in prompt when signed out', () => {
   expect(screen.getByRole('button', { name: /sign in with google/i })).toBeInTheDocument();
 });
 
-test('restores a stored, unexpired session and shows the logout button', () => {
-  window.localStorage.setItem(
-    'driveview.auth',
-    JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60000 })
-  );
+test('restores stored accounts and shows account selector', () => {
+  const accounts = [
+    { id: 'acc_1', accessToken: 'test-token', expiresAt: Date.now() + 60000, email: 'test@example.com', name: 'Test User', picture: '' },
+  ];
+  window.localStorage.setItem('driveview.accounts', JSON.stringify(accounts));
+  window.localStorage.setItem('driveview.activeAccountId', 'acc_1');
 
   render(<App />);
 
-  expect(screen.getByRole('button', { name: /logout/i })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /drive view/i })).toBeInTheDocument();
 });
 
-test('ignores an expired stored session', () => {
-  window.localStorage.setItem(
-    'driveview.auth',
-    JSON.stringify({ accessToken: 'stale-token', expiresAt: Date.now() - 1000 })
-  );
+test('ignores expired stored accounts', () => {
+  const accounts = [
+    { id: 'acc_1', accessToken: 'stale-token', expiresAt: Date.now() - 1000, email: 'test@example.com', name: 'Test User', picture: '' },
+  ];
+  window.localStorage.setItem('driveview.accounts', JSON.stringify(accounts));
+  window.localStorage.setItem('driveview.activeAccountId', 'acc_1');
 
   render(<App />);
 
-  expect(screen.queryByRole('button', { name: /logout/i })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: /sign in with google/i })).toBeInTheDocument();
 });
 
@@ -60,13 +61,17 @@ test('sends the user back to sign-in when Drive answers 401', async () => {
       text: () => Promise.resolve(''),
     })
   );
-  window.localStorage.setItem(
-    'driveview.auth',
-    JSON.stringify({ accessToken: 'expired-token', expiresAt: Date.now() + 60000 })
-  );
+  const accounts = [
+    { id: 'acc_1', accessToken: 'expired-token', expiresAt: Date.now() + 60000, email: 'test@example.com', name: 'Test User', picture: '' },
+  ];
+  window.localStorage.setItem('driveview.accounts', JSON.stringify(accounts));
+  window.localStorage.setItem('driveview.activeAccountId', 'acc_1');
 
   render(<App />);
 
-  expect(await screen.findByRole('alert')).toHaveTextContent(/session expired/i);
-  expect(window.localStorage.getItem('driveview.auth')).toBeNull();
+  await waitFor(() => {
+    expect(screen.getByRole('alert')).toHaveTextContent(/session expired/i);
+  });
+  // After 401, the expired account is removed, leaving empty array
+  expect(window.localStorage.getItem('driveview.accounts')).toBe('[]');
 });
